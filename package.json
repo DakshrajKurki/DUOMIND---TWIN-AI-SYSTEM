@@ -1,0 +1,6 @@
+{
+  "name": "duomind",
+  "private": true,
+  "description": "DuoMind: personal decision intelligence (static site + Gemini proxy)",
+  "engines": { "node": ">=18" }
+}
