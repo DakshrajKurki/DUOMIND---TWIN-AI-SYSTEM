@@ -25,7 +25,8 @@ function send(res, status, obj) {
 }
 const fail = (res, status, message) => send(res, status, { error: { code: status, message } });
 const hide = s => String(s || '').split(process.env.GEMINI_API_KEY || '\u0000').join('[hidden]');
-const notAvailable = (status, msg) => status === 404 || (status === 400 && /not found|not supported|unknown model|is not available/i.test(msg));
+// Only an invalid key stops the fallback chain; any other error (model missing, no free-tier access, quota, timeout) tries the next model.
+const badKey = (status, msg) => status === 401 || /api key not valid|API_KEY_INVALID|api key expired|API key not found/i.test(msg);
 
 function limited(req) {
   const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
@@ -41,8 +42,8 @@ function googleUrl(model, stream) {
 }
 
 // Calls Gemini, falling back to other models if the requested one isn't available.
-async function callWithFallback(model, body, stream) {
-  const order = [working.get(model) || model, model, ...FALLBACKS].filter((m, i, a) => a.indexOf(m) === i);
+async function callWithFallback(model, body, stream, tried = []) {
+  const order = [working.get(model) || model, model, ...MODELS, ...FALLBACKS].filter((m, i, a) => a.indexOf(m) === i);
   let last = null;
   for (const m of order) {
     let r;
@@ -52,7 +53,8 @@ async function callWithFallback(model, body, stream) {
     const text = await r.text();
     let msg = text; try { msg = JSON.parse(text).error.message || text; } catch (e) {}
     last = { status: r.status, text, msg, model: m };
-    if (!notAvailable(r.status, msg)) break;   // key/quota/other errors: stop trying
+    tried.push(`${m}: ${r.status} ${String(msg).slice(0, 120)}`);
+    if (badKey(r.status, msg)) break;
   }
   return { failed: last };
 }
@@ -62,10 +64,14 @@ module.exports = async function handler(req, res) {
   if (req.method === 'GET') {
     if (limited(req)) return fail(res, 429, 'Too many requests. Please wait a few minutes.');
     if (!process.env.GEMINI_API_KEY) return send(res, 200, { ok: false, keySet: false, message: 'GEMINI_API_KEY is not set in Vercel. Add it under Settings → Environment Variables, then redeploy.' });
-    const out = await callWithFallback(MODELS[MODELS.length - 1] || FALLBACKS[0], { contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK.' }] }] }, false);
-    if (out.network) return send(res, 200, { ok: false, keySet: true, message: 'The server could not reach Google.' });
-    if (out.failed) return send(res, 200, { ok: false, keySet: true, googleStatus: out.failed.status, message: 'Google rejected the request: ' + hide(out.failed.msg) });
-    return send(res, 200, { ok: true, keySet: true, workingModel: out.used, message: 'Gemini is connected.' });
+    const ping = { contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK.' }] }] };
+    const models = {};
+    for (const m of MODELS) {
+      const tried = [], out = await callWithFallback(m, ping, false, tried);
+      models[m] = out.network ? 'could not reach Google' : out.failed ? 'FAILED — ' + hide(tried.join(' | ')) : (out.used === m ? 'works' : `not available, using ${out.used} instead` + (tried.length ? ' (' + hide(tried[0]) + ')' : ''));
+    }
+    const ok = Object.values(models).every(v => !/^FAILED|could not/.test(v));
+    return send(res, 200, { ok, keySet: true, models, message: ok ? 'Gemini is connected.' : 'Some models failed — see "models".' });
   }
 
   if (req.method !== 'POST') return fail(res, 405, 'Use POST.');
