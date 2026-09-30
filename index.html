@@ -571,7 +571,7 @@ details.ev[open] summary::before{transform:rotate(45deg)}
             <div class="formnote" id="formNote"></div>
             <button class="btn btn-primary" type="submit" id="authSubmit" style="padding:13px"><span>Sign in</span><svg class="arr" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
             <div class="or">or</div>
-            <button type="button" class="btn demo-btn" id="demoBtn"><svg viewBox="0 0 24 24"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></svg>Try the live demo — no sign-up</button>
+            <button type="button" class="btn demo-btn" id="demoBtn"><svg viewBox="0 0 24 24"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z"/></svg>Continue as guest — no sign-up</button>
             <button type="button" class="btn sso" id="ssoBtn" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg><span id="ssoLabel">Continue with your Claude account</span></button>
           </form>
           <p class="fine">Accounts live on this device, and passwords are stored only as salted SHA-256 hashes.</p>
@@ -977,12 +977,12 @@ function fidelity() {
   return { conf, acc: acc * 100, cov: on * 100, know, total: Math.round(conf * .35 + acc * 100 * .25 + on * 100 * .15 + know * .25) };
 }
 /* ---------- demo account: a realistic, pre-filled Twin ---------- */
-const DEMO = { email: 'demo@duomind.app', name: 'Riya Sharma' };
+const DEMO = { email: 'guest@duomind.app', name: 'Guest' };
 function demoAccount() { const acc = Auth.accounts(); acc[DEMO.email] = { id: 'u_demo', name: DEMO.name, email: DEMO.email, demo: true, createdAt: now() }; Auth.save(acc); return acc[DEMO.email]; }
 function seedDemo(acc) {
   const D = 86400000, t = now(), ago_ = d => t - d * D;
   T = blankTwin(acc); T.onboarded = true; T.createdAt = ago_(30);
-  Object.assign(T.profile, { name: 'Riya Sharma', role: '3rd-year CS student & product intern', sector: 'Student',
+  Object.assign(T.profile, { name: 'Guest', role: '3rd-year CS student & product intern', sector: 'Student',
     goals: ['Land a PPO from my product internship', 'Keep my CGPA above 8.5', 'Win a national hackathon this year', 'Hit the gym 4 times a week'],
     hours: 12, risk: 55, budget: '₹15,000 for courses this semester', tone: 'concise' });
   const plan = {
@@ -1013,13 +1013,7 @@ function seedDemo(acc) {
   T.predictions = [{ at: ago_(24), hit: true, dec: d1.id }, { at: ago_(17), hit: true, dec: d2.id }, { at: ago_(9), hit: false, dec: d3.id }];
   const convo = (d, title, pairs) => ({ id: uid('t'), title, at: ago_(d), messages: pairs.flatMap(([u, a, extra]) => [{ id: uid('m'), role: 'u', content: u, at: ago_(d) }, Object.assign({ id: uid('m'), role: 'a', content: a, at: ago_(d) + 4000, engine: 'local' }, extra || {})]) });
   const reply = dec => localReply(dec.q, { intent: 'decision', questions: [] }, dec, []);
-  T.threads = [
-    convo(1, 'Hackathon prototype: React or no-code?', [[d5.q, '', { decId: d5.id }]]),
-    convo(3, 'PPO interview timing', [[d4.q, '', { decId: d4.id }]]),
-    convo(27, 'Gym habit', [['I never skip gym, even in exam weeks.', 'Got it — I’ll remember that you never skip the gym, even in exam weeks. That matters whenever a decision squeezes your evenings, so I’ll weigh it in.', { learned: ['Never skips gym, even in exam weeks'] }]])
-  ];
-  T.threads[0].messages[1].content = reply(d5); T.threads[1].messages[1].content = reply(d4);
-  T.activeThread = T.threads[0].id;
+  T.threads = []; T.activeThread = null;   // guests start with an empty chat
   T.version = { major: 1, minor: 6 };
   T.log = [
     { at: ago_(3), v: 'v1.6', msg: 'Learned from chat: Decision Speed 62→66; Evidence Reliance 58→63' },
@@ -1384,7 +1378,19 @@ const Gemini = {
   },
   key() { const c = this.cfg(); return c.key || (c.proxy ? 'proxy' : ''); },
   viaProxy() { const c = this.cfg(); return !c.key && !!c.proxy; },
+  FALLBACKS: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-2.0-flash'],
+  works: {},
   async call(model, body, signal, stream) {
+    if (this.viaProxy()) return this.callOnce(model, body, signal, stream);
+    const order = [this.works[model] || model, model, ...this.FALLBACKS].filter((m, i, a) => a.indexOf(m) === i);
+    let lastErr;
+    for (const m of order) {
+      try { const r = await this.callOnce(m, body, signal, stream); this.works[model] = m; return r; }
+      catch (e) { lastErr = e; if (!e || e.code !== 'bad_model') throw e; }
+    }
+    throw lastErr;
+  },
+  async callOnce(model, body, signal, stream) {
     const c = this.cfg(), viaProxy = this.viaProxy();
     const url = viaProxy ? c.proxy : `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:${stream ? 'streamGenerateContent?alt=sse&' : 'generateContent?'}key=${encodeURIComponent(c.key)}`;
     const payload = viaProxy ? { model, stream: !!stream, body } : body;
@@ -1393,7 +1399,7 @@ const Gemini = {
     catch (e) { if (e && e.name === 'AbortError') throw { code: 'cancelled' }; throw { code: 'network', message: 'Could not reach the Gemini API. Check your internet connection.' }; }
     if (!res.ok) {
       let msg = ''; try { const j = await res.json(); msg = (j.error && j.error.message) || ''; } catch (e) {}
-      const code = res.status === 401 || res.status === 403 || (res.status === 400 && /api key|API_KEY/i.test(msg)) ? 'bad_key' : res.status === 404 ? 'bad_model' : res.status === 429 ? 'rate_limited' : 'upstream_error';
+      const code = res.status === 401 || res.status === 403 || (res.status === 400 && /api key|API_KEY/i.test(msg)) || (res.status === 500 && /GEMINI_API_KEY/.test(msg)) ? 'bad_key' : (res.status === 404 || (res.status === 400 && /not found|not supported/i.test(msg))) ? 'bad_model' : res.status === 429 ? 'rate_limited' : 'upstream_error';
       if (viaProxy && code === 'bad_key') throw { code, message: msg || 'The DuoMind server could not use its Gemini key.' };
       throw { code, message: msg || `Gemini API error ${res.status}` };
     }
@@ -1444,9 +1450,11 @@ const AI = {
   fail(e) {
     const c = e && e.code;
     if (['not_granted','sampling_disabled','not_declared','capability_disabled','capability_removed'].includes(c)) { this.state = 'declined'; this.provider = null; this.refresh(); }
-    else if (this.provider === 'gemini' && (c === 'bad_key' || c === 'bad_model')) { this.state = 'error'; this.err = c === 'bad_key' ? (Gemini.viaProxy() ? 'The server’s Gemini key is missing or invalid.' : 'Gemini rejected the API key.') : `Gemini model not found (${Gemini.cfg().model} / ${Gemini.cfg().fast}).`; engineBadge(); toast(this.err + ' Using the offline engine — fix it in Settings.', 'warn'); }
-    else if (this.provider === 'gemini' && c === 'rate_limited') toast('Gemini rate limit reached. This answer used the offline engine.', 'warn');
-    else if (this.provider === 'gemini' && c === 'network') toast('Couldn’t reach Gemini. This answer used the offline engine.', 'warn');
+    else if (this.provider === 'gemini' && c && c !== 'cancelled' && !['bad_key','bad_model'].includes(c)) {
+      const detail = e.message ? ` (${short(e.message, 140)})` : '';
+      toast(({ rate_limited: 'Gemini rate limit reached.', network: 'Couldn’t reach Gemini.', invalid_json: 'Gemini returned an unreadable answer.', empty_completion: 'Gemini returned an empty answer.' }[c] || 'Gemini error.') + detail + ' This answer used the offline engine.', 'warn');
+    }
+    else if (this.provider === 'gemini' && (c === 'bad_key' || c === 'bad_model')) { this.state = 'error'; this.err = c === 'bad_key' ? (Gemini.viaProxy() ? 'The server’s Gemini key is missing or invalid.' : 'Gemini rejected the API key.') + (e.message ? ` Google said: ${short(e.message, 140)}` : '') : `No available Gemini model worked.${e.message ? ' Google said: ' + short(e.message, 140) : ''}`; engineBadge(); toast(this.err + ' Using the offline engine — fix it in Settings.', 'warn'); }
   },
   json(prompt, signal) { return this.provider === 'claude' ? this.sample.json(prompt, { modelTier: 'quick', signal, cache: false }) : Gemini.json(prompt, signal); }
 };
@@ -2032,10 +2040,10 @@ function saveProfile(e) {
 /* ---------- shared refresh ---------- */
 function refreshAll() {
   if (!T) return;
-  $('#vchip').textContent = (ACC.demo ? 'Demo · ' : 'Twin ') + vstr(); $('#vchip').classList.toggle('demo', !!ACC.demo);
+  $('#vchip').textContent = (ACC.demo ? 'Guest · ' : 'Twin ') + vstr(); $('#vchip').classList.toggle('demo', !!ACC.demo);
   const init = (T.profile.name || ACC.name || '?').trim().charAt(0).toUpperCase();
   $('#avatarBtn').innerHTML = claudeUser && ACC.sso && claudeUser.avatarUrl ? `<img alt="" src="${esc(claudeUser.avatarUrl)}">` : esc(init);
-  $('#menuName').textContent = T.profile.name || ACC.name; $('#menuMail').textContent = ACC.sso ? 'Signed in with Claude' : ACC.email;
+  $('#menuName').textContent = T.profile.name || ACC.name; $('#menuMail').textContent = ACC.demo ? 'Guest login · sample data, resets each visit' : ACC.sso ? 'Signed in with Claude' : ACC.email;
   $('#memHint').textContent = `${T.memory.length} memories · ${T.profile.goals.length} goals in context`;
   if (!busy) setBusy(false);
   if (route === 'home') renderHome(false);
@@ -2349,7 +2357,7 @@ function enterApp(acc, isNew) {
   if (!T.profile.name) T.profile.name = acc.name || '';
   saveTwin(); refreshAll();
   if (!T.onboarded) { toast(isNew ? `Welcome, ${esc((acc.name || '').split(' ')[0] || 'there')}. Let’s build your Twin.` : 'Let’s finish setting up your Twin.', 'good'); go('onboarding'); }
-  else if (acc.demo) { toast('You’re exploring a demo Twin: Riya, a CS student. It resets each time you open the demo.', 'good'); go('home'); }
+  else if (acc.demo) { toast('Signed in as a guest with sample data. It resets each time you continue as a guest.', 'good'); go('home'); }
   else { toast(`Welcome back, ${esc(firstName())}.`, 'good'); go('home'); }
 }
 function signOut() { busy && busy.ctl.abort(); Auth.clear(); ACC = null; T = null; computeCache.clear(); go('auth'); setAuthMode('in'); $('#fPass').value = ''; toast('Signed out.'); }
